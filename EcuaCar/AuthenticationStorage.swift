@@ -20,11 +20,20 @@ struct AuthenticationData: Codable {
     var cookie2: String?
     var loginTimestamp: Date?
     
-    var isValid: Bool {
+    func isValid(expirationDuration: TimeInterval) -> Bool {
         guard let authToken = authToken, !authToken.isEmpty else {
             return false
         }
-        return true
+        
+        // Check if the data has expired
+        guard let timestamp = loginTimestamp else {
+            return false
+        }
+        
+        let expirationDate = timestamp.addingTimeInterval(expirationDuration)
+        let isNotExpired = Date() < expirationDate
+        
+        return isNotExpired
     }
 }
 
@@ -38,6 +47,9 @@ class AuthenticationStorage: ObservableObject {
     
     private let keychainService = "com.ecuacar.auth"
     private let keychainAccount = "user-auth-data"
+    
+    // Configurable expiration duration (default: 5 minutes)
+    var expirationDuration: TimeInterval = 5 * 60 // 5 minutes in seconds
     
     private init() {
         // Load authentication data on initialization
@@ -89,7 +101,7 @@ class AuthenticationStorage: ObservableObject {
         // Store the data securely
         self.authData = authData
         saveToKeychain(authData)
-        self.isAuthenticated = authData.isValid
+        self.isAuthenticated = authData.isValid(expirationDuration: expirationDuration)
     }
     
     // MARK: - Parse Cookies
@@ -174,9 +186,16 @@ class AuthenticationStorage: ObservableObject {
             do {
                 let decoder = JSONDecoder()
                 let authData = try decoder.decode(AuthenticationData.self, from: data)
-                self.authData = authData
-                self.isAuthenticated = authData.isValid
-                print("✅ Loaded authentication data from Keychain")
+                
+                // Check if the data has expired
+                if authData.isValid(expirationDuration: expirationDuration) {
+                    self.authData = authData
+                    self.isAuthenticated = true
+                    print("✅ Loaded authentication data from Keychain")
+                } else {
+                    print("⚠️ Authentication data has expired, clearing...")
+                    clearAuthData()
+                }
             } catch {
                 print("⚠️ Failed to decode auth data: \(error)")
             }
@@ -201,20 +220,54 @@ class AuthenticationStorage: ObservableObject {
         print("✅ Cleared authentication data")
     }
     
+    // MARK: - Validation
+    /// Checks if the stored authentication data is still valid (not expired)
+    func validateAuthData() -> Bool {
+        guard let authData = authData else {
+            return false
+        }
+        
+        let valid = authData.isValid(expirationDuration: expirationDuration)
+        
+        if !valid {
+            print("⚠️ Authentication data has expired")
+            clearAuthData()
+        }
+        
+        return valid
+    }
+    
+    /// Returns the remaining time before expiration
+    func remainingTime() -> TimeInterval? {
+        guard let timestamp = authData?.loginTimestamp else {
+            return nil
+        }
+        
+        let expirationDate = timestamp.addingTimeInterval(expirationDuration)
+        let remaining = expirationDate.timeIntervalSince(Date())
+        
+        return remaining > 0 ? remaining : 0
+    }
+    
     // MARK: - Helper Methods for API Requests
     func getAuthToken() -> String? {
+        guard validateAuthData() else { return nil }
         return authData?.authToken
     }
     
     func getXSRFToken() -> String? {
+        guard validateAuthData() else { return nil }
         return authData?.xXsrfToken
     }
     
     func getMessageUniqueId() -> String? {
+        guard validateAuthData() else { return nil }
         return authData?.messageUniqueId
     }
     
     func getAllCookies() -> [String] {
+        guard validateAuthData() else { return [] }
+        
         var cookies: [String] = []
         
         if let cookie0 = authData?.cookie0 {
@@ -234,6 +287,12 @@ class AuthenticationStorage: ObservableObject {
     }
     
     func configureCookiesForRequest(_ request: inout URLRequest) {
+        // Validate before configuring
+        guard validateAuthData() else {
+            print("⚠️ Cannot configure request: authentication data expired or invalid")
+            return
+        }
+        
         // Add X-AUTH-TOKEN header
         if let authToken = getAuthToken() {
             request.setValue(authToken, forHTTPHeaderField: "X-AUTH-TOKEN")
