@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Combine
 
 struct ContentView: View {
     @State private var showOnboarding = true
@@ -178,12 +179,107 @@ struct OnboardingPageView: View {
     }
 }
 
+// MARK: - Login API Service
+struct LoginRequest: Codable {
+    let email: String
+    let password: String
+}
+
+struct LoginResponse: Codable {
+    // Add the properties that your API returns
+    // For example:
+    // let token: String
+    // let userId: String
+    // Adjust based on your actual API response
+}
+
+enum LoginError: Error, LocalizedError {
+    case invalidURL
+    case invalidResponse
+    case unauthorized
+    case serverError(String)
+    case networkError(Error)
+    
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "Invalid URL"
+        case .invalidResponse:
+            return "Invalid response from server"
+        case .unauthorized:
+            return "Invalid email or password"
+        case .serverError(let message):
+            return message
+        case .networkError(let error):
+            return "Network error: \(error.localizedDescription)"
+        }
+    }
+}
+
+@MainActor
+class LoginViewModel: ObservableObject {
+    @Published var email: String = ""
+    @Published var password: String = ""
+    @Published var isLoading: Bool = false
+    @Published var errorMessage: String? = nil
+    
+    func login() async throws {
+        guard !email.isEmpty, !password.isEmpty else {
+            errorMessage = "Please enter email and password"
+            return
+        }
+        
+        isLoading = true
+        errorMessage = nil
+        
+        defer { isLoading = false }
+        
+        guard let url = URL(string: "http://172.20.96.1:5066/ec-car-sales/api/public/login") else {
+            throw LoginError.invalidURL
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let loginRequest = LoginRequest(email: email, password: password)
+        request.httpBody = try JSONEncoder().encode(loginRequest)
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw LoginError.invalidResponse
+            }
+            
+            switch httpResponse.statusCode {
+            case 200...299:
+                // Successfully logged in
+                // You can decode the response here if needed:
+                // let loginResponse = try JSONDecoder().decode(LoginResponse.self, from: data)
+                return
+                
+            case 401:
+                throw LoginError.unauthorized
+                
+            default:
+                let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown error"
+                throw LoginError.serverError(errorMsg)
+            }
+        } catch let error as LoginError {
+            throw error
+        } catch {
+            throw LoginError.networkError(error)
+        }
+    }
+}
+
 // MARK: - Login Page View
 struct LoginPageView: View {
     @Binding var isLoggedIn: Bool
-    @State private var email: String = ""
-    @State private var password: String = ""
+    @StateObject private var viewModel = LoginViewModel()
     @State private var showPassword: Bool = false
+    @State private var showAlert: Bool = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -207,8 +303,11 @@ struct LoginPageView: View {
                         Image(systemName: "envelope.fill")
                             .foregroundColor(.gray)
                         
-                        TextField("", text: $email)
+                        TextField("", text: $viewModel.email)
                             .textFieldStyle(.plain)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.emailAddress)
                     }
                     .padding()
                     .background(Color.gray.opacity(0.1))
@@ -230,11 +329,15 @@ struct LoginPageView: View {
                             .foregroundColor(.gray)
                         
                         if showPassword {
-                            TextField("", text: $password)
+                            TextField("", text: $viewModel.password)
                                 .textFieldStyle(.plain)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
                         } else {
-                            SecureField("", text: $password)
+                            SecureField("", text: $viewModel.password)
                                 .textFieldStyle(.plain)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
                         }
                         
                         Button(action: {
@@ -257,17 +360,32 @@ struct LoginPageView: View {
             
             // Login button
             Button(action: {
-                // Handle login
-                isLoggedIn = true
+                Task {
+                    do {
+                        try await viewModel.login()
+                        isLoggedIn = true
+                    } catch {
+                        viewModel.errorMessage = error.localizedDescription
+                        showAlert = true
+                    }
+                }
             }) {
-                Text("Login")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    .background(Color.blue)
-                    .cornerRadius(12)
+                HStack {
+                    if viewModel.isLoading {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(0.8)
+                    }
+                    Text(viewModel.isLoading ? "Logging in..." : "Login")
+                        .font(.system(size: 18, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .background(viewModel.isLoading ? Color.blue.opacity(0.7) : Color.blue)
+                .cornerRadius(12)
             }
+            .disabled(viewModel.isLoading)
             .padding(.horizontal, 32)
             .padding(.top, 32)
             
@@ -287,6 +405,11 @@ struct LoginPageView: View {
             Spacer()
         }
         .background(Color.white)
+        .alert("Login Error", isPresented: $showAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(viewModel.errorMessage ?? "An unknown error occurred")
+        }
     }
 }
 
