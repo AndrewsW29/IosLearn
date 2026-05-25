@@ -9,22 +9,25 @@ import SwiftUI
 import Combine
 
 struct ContentView: View {
+    @StateObject private var authStorage = AuthenticationStorage.shared
     @State private var showOnboarding = true
-    @State private var isLoggedIn = false
     
     var body: some View {
-        if isLoggedIn {
-            HomeView()
-        } else {
-            OnboardingFlow(isLoggedIn: $isLoggedIn)
+        Group {
+            if authStorage.isAuthenticated {
+                HomeView()
+            } else {
+                OnboardingFlow()
+            }
         }
+        .environmentObject(authStorage)
     }
 }
 
 // MARK: - Onboarding Flow
 struct OnboardingFlow: View {
     @State private var currentPage = 0
-    @Binding var isLoggedIn: Bool
+    @EnvironmentObject var authStorage: AuthenticationStorage
     
     private let totalPages = 4 // 3 onboarding images + 1 login page
     
@@ -81,7 +84,7 @@ struct OnboardingFlow: View {
                     .zIndex(currentPage == 2 ? 1 : 0)
                     
                     // Login page
-                    LoginPageView(isLoggedIn: $isLoggedIn)
+                    LoginPageView()
                         .opacity(currentPage == 3 ? 1 : 0)
                         .zIndex(currentPage == 3 ? 1 : 0)
                 }
@@ -186,11 +189,8 @@ struct LoginRequest: Codable {
 }
 
 struct LoginResponse: Codable {
-    // Add the properties that your API returns
-    // For example:
-    // let token: String
-    // let userId: String
-    // Adjust based on your actual API response
+    // The response body can be empty or contain user data
+    // The important data comes from headers
 }
 
 enum LoginError: Error, LocalizedError {
@@ -223,6 +223,8 @@ class LoginViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
     
+    private let authStorage = AuthenticationStorage.shared
+    
     func login() async throws {
         guard !email.isEmpty, !password.isEmpty else {
             errorMessage = "Please enter email and password"
@@ -234,7 +236,7 @@ class LoginViewModel: ObservableObject {
         
         defer { isLoading = false }
         
-        guard let url = URL(string: "http://172.20.96.1:5066/ec-car-sales/api/public/login") else {
+        guard let url = URL(string: "http://192.168.2.9:80/ec-car-sales/api/public/login") else {
             throw LoginError.invalidURL
         }
         
@@ -254,9 +256,14 @@ class LoginViewModel: ObservableObject {
             
             switch httpResponse.statusCode {
             case 200...299:
-                // Successfully logged in
-                // You can decode the response here if needed:
+                // Successfully logged in - Store authentication headers
+                print("📦 Login successful - storing authentication data...")
+                authStorage.storeAuthenticationHeaders(from: httpResponse)
+                
+                // Optional: decode response body if needed
                 // let loginResponse = try JSONDecoder().decode(LoginResponse.self, from: data)
+                
+                print("✅ Authentication data stored successfully")
                 return
                 
             case 401:
@@ -276,7 +283,7 @@ class LoginViewModel: ObservableObject {
 
 // MARK: - Login Page View
 struct LoginPageView: View {
-    @Binding var isLoggedIn: Bool
+    @EnvironmentObject var authStorage: AuthenticationStorage
     @StateObject private var viewModel = LoginViewModel()
     @State private var showPassword: Bool = false
     @State private var showAlert: Bool = false
@@ -363,7 +370,7 @@ struct LoginPageView: View {
                 Task {
                     do {
                         try await viewModel.login()
-                        isLoggedIn = true
+                        // No need to set isLoggedIn - authStorage handles it
                     } catch {
                         viewModel.errorMessage = error.localizedDescription
                         showAlert = true
@@ -963,10 +970,56 @@ struct WishListView: View {
 }
 
 struct ProfileView: View {
+    @EnvironmentObject var authStorage: AuthenticationStorage
+    
     var body: some View {
-        VStack {
+        VStack(spacing: 20) {
             Text("Profile")
                 .font(.largeTitle)
+            
+            // Display auth info (for debugging)
+            if let authData = authStorage.authData {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let token = authData.authToken {
+                        Text("Token: \(token.prefix(20))...")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                    
+                    if let uniqueId = authData.messageUniqueId {
+                        Text("Unique ID: \(uniqueId)")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                    
+                    if let timestamp = authData.loginTimestamp {
+                        Text("Logged in: \(timestamp.formatted())")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                }
+                .padding()
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(12)
+                .padding(.horizontal)
+            }
+            
+            Spacer()
+            
+            // Logout button
+            Button(action: {
+                authStorage.clearAuthData()
+            }) {
+                Text("Logout")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(Color.red)
+                    .cornerRadius(12)
+            }
+            .padding(.horizontal, 32)
+            .padding(.bottom, 32)
         }
     }
 }
