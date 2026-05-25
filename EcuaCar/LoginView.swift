@@ -147,11 +147,6 @@ struct LoginPageView: View {
     }
 }
 
-// MARK: - Login API Models and ViewModel
-struct LoginRequest: Codable {
-    let email: String
-    let password: String
-}
 
 struct LoginResponse: Codable {
     // The response body can be empty or contain user data
@@ -188,7 +183,14 @@ class LoginViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
     
+    // Published properties for API data
+    @Published var userProfile: UserProfile?
+    @Published var cars: [Car] = []
+    @Published var isLoadingProfile: Bool = false
+    @Published var isLoadingCars: Bool = false
+    
     private let authStorage = AuthenticationStorage.shared
+    private let apiService = APIService.shared
     
     func login() async throws {
         guard !email.isEmpty, !password.isEmpty else {
@@ -201,48 +203,124 @@ class LoginViewModel: ObservableObject {
         
         defer { isLoading = false }
         
-        guard let url = URL(string: "http://192.168.2.9:80/ec-car-sales/api/public/login") else {
-            throw LoginError.invalidURL
-        }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        let loginRequest = LoginRequest(email: email, password: password)
-        request.httpBody = try JSONEncoder().encode(loginRequest)
-        
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            // Use APIService.Login() method
+            let (data, httpResponse) = try await apiService.Login(password: password, email: email)
             
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw LoginError.invalidResponse
-            }
+            // Successfully logged in - Store authentication headers
+            print("📦 Login successful - storing authentication data...")
+            authStorage.storeAuthenticationHeaders(from: httpResponse)
             
-            switch httpResponse.statusCode {
-            case 200...299:
-                // Successfully logged in - Store authentication headers
-                print("📦 Login successful - storing authentication data...")
-                authStorage.storeAuthenticationHeaders(from: httpResponse)
-                
-                // Optional: decode response body if needed
-                // let loginResponse = try JSONDecoder().decode(LoginResponse.self, from: data)
-                
-                print("✅ Authentication data stored successfully")
-                return
-                
-            case 401:
-                throw LoginError.unauthorized
-                
-            default:
-                let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown error"
-                throw LoginError.serverError(errorMsg)
-            }
-        } catch let error as LoginError {
-            throw error
+            print("✅ Authentication data stored successfully")
+            
+            // After successful login, optionally fetch initial data
+            await fetchInitialData()
+            
+        } catch APIError.serverError(let statusCode, let message) where statusCode == 401 {
+            throw LoginError.unauthorized
+        } catch APIError.serverError(let statusCode, let message) {
+            throw LoginError.serverError(message)
+        } catch APIError.invalidURL {
+            throw LoginError.invalidURL
+        } catch APIError.invalidResponse {
+            throw LoginError.invalidResponse
         } catch {
             throw LoginError.networkError(error)
         }
+    }
+    
+    // MARK: - API Service Methods
+    
+    /// Fetch initial data after login (user profile and cars)
+    func fetchInitialData() async {
+        async let profile = fetchUserProfile()
+        async let cars = fetchCars()
+        
+        // Wait for both to complete
+        _ = await (profile, cars)
+    }
+    
+    /// Fetch user profile using APIService
+    @discardableResult
+    func fetchUserProfile() async -> Bool {
+        isLoadingProfile = true
+        defer { isLoadingProfile = false }
+        
+        do {
+            let profile: UserProfile = try await apiService.fetchUserProfile()
+            self.userProfile = profile
+            print("✅ User profile loaded: \(profile.name)")
+            return true
+        } catch APIError.unauthorized {
+            // Session expired - clear auth and show login
+            errorMessage = "Your session has expired. Please log in again."
+            return false
+        } catch {
+            errorMessage = "Failed to load profile: \(error.localizedDescription)"
+            print("⚠️ Failed to load user profile: \(error)")
+            return false
+        }
+    }
+    
+    /// Fetch cars using APIService
+    @discardableResult
+    func fetchCars(page: Int = 1, limit: Int = 20) async -> Bool {
+        isLoadingCars = true
+        defer { isLoadingCars = false }
+        
+        do {
+            let response: CarListResponse = try await apiService.fetchCars(page: page, limit: limit)
+            self.cars = response.cars
+            print("✅ Loaded \(response.cars.count) cars (page \(response.currentPage) of \(response.totalPages))")
+            return true
+        } catch APIError.unauthorized {
+            // Session expired
+            errorMessage = "Your session has expired. Please log in again."
+            return false
+        } catch {
+            errorMessage = "Failed to load cars: \(error.localizedDescription)"
+            print("⚠️ Failed to load cars: \(error)")
+            return false
+        }
+    }
+    
+    /// Add a car to cart using APIService
+    func addToCart(carId: String) async -> Bool {
+        do {
+            let response: CartResponse = try await apiService.addToCart(carId: carId)
+            print("✅ Added to cart: \(response.message)")
+            return response.success
+        } catch APIError.unauthorized {
+            errorMessage = "Your session has expired. Please log in again."
+            return false
+        } catch {
+            errorMessage = "Failed to add to cart: \(error.localizedDescription)"
+            print("⚠️ Failed to add to cart: \(error)")
+            return false
+        }
+    }
+    
+    /// Check authentication status and remaining time
+    func checkAuthStatus() {
+        if authStorage.isAuthenticated {
+            if let remainingTime = authStorage.remainingTime() {
+                let minutes = Int(remainingTime / 60)
+                let seconds = Int(remainingTime.truncatingRemainder(dividingBy: 60))
+                print("🔐 Authentication valid for \(minutes)m \(seconds)s")
+            }
+        } else {
+            print("⚠️ Not authenticated or session expired")
+        }
+    }
+    
+    /// Logout and clear all data
+    func logout() {
+        authStorage.clearAuthData()
+        userProfile = nil
+        cars = []
+        email = ""
+        password = ""
+        print("👋 Logged out successfully")
     }
 }
 

@@ -13,7 +13,7 @@ class APIService {
     static let shared = APIService()
     
     private let authStorage = AuthenticationStorage.shared
-    private let baseURL = "http://172.20.96.1:5066/ec-car-sales/api"
+    private let baseURL = "http://192.168.2.9:80/ec-car-sales/api"
     
     private init() {}
     
@@ -78,7 +78,42 @@ class APIService {
         }
     }
     
-    // MARK: - Example API Calls
+    // MARK: - Public API Calls (No Authentication Required)
+    
+    /// Login method that returns the HTTPURLResponse for header extraction
+    func Login(password: String, email: String) async throws -> (data: Data, response: HTTPURLResponse) {
+        guard let url = URL(string: "\(baseURL)/public/login") else {
+            throw APIError.invalidURL
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let loginBody = LoginRequest(email: email, password: password)
+        request.httpBody = try JSONEncoder().encode(loginBody)
+        
+        // Log request details
+        printRequestDetails(request)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+        
+        // Log response details
+        printResponseDetails(httpResponse, data: data)
+        
+        guard httpResponse.statusCode == 200 || httpResponse.statusCode == 201 else {
+            let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw APIError.serverError(statusCode: httpResponse.statusCode, message: errorMsg)
+        }
+        
+        return (data, httpResponse)
+    }
+    
+    // MARK: - Authenticated API Calls
     
     // Fetch user profile
     func fetchUserProfile() async throws -> UserProfile {
@@ -155,6 +190,11 @@ enum APIError: Error, LocalizedError {
 }
 
 // MARK: - Example Response Models
+
+struct LoginRequest: Codable {
+    let email: String
+    let password: String
+}
 
 struct UserProfile: Codable {
     let id: String
